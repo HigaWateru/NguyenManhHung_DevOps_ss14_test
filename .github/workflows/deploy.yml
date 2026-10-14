@@ -1,0 +1,153 @@
+name: Campus Hub CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  # -----------------------------------------------------------
+  # GIAI ĐOẠN 1: KIỂM THỬ VÀ ĐÓNG GÓI MÃ NGUỒN (CI)
+  # -----------------------------------------------------------
+  build-and-test:
+    name: Build & Test Backend and Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. Checkout mã nguồn từ GitHub
+        uses: actions/checkout@v4
+
+      # Setup Java 21 & Build Backend Spring Boot
+      - name: 2. Thiết lập môi trường OpenJDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: 3. Cấp quyền thực thi cho gradlew
+        run: chmod +x backend/gradlew
+
+      - name: 4. Build Spring Boot Jar (bỏ qua test hoặc chạy test)
+        run: |
+          cd backend
+          ./gradlew bootJar -x test
+
+      # Setup Node.js 20 & Build Frontend React Vite
+      - name: 5. Thiết lập môi trường Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 6. Build Frontend React với Vite
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      # Lưu trữ file build làm Artifacts để phục vụ deploy nếu cần
+      - name: 7. Lưu trữ artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            backend/build/libs/*.jar
+            frontend/dist/
+
+  # -----------------------------------------------------------
+  # GIAI ĐOẠN 2: BUILD & PUSH DOCKER IMAGE LÊN DOCKER HUB
+  # -----------------------------------------------------------
+  docker-build-push:
+    name: Build and Push Docker Image
+    needs: build-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. Checkout mã nguồn
+        uses: actions/checkout@v4
+
+      - name: 2. Thiết lập JDK 21 để build lại JAR cho Dockerfile
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: 3. Build file JAR
+        run: |
+          chmod +x backend/gradlew
+          cd backend
+          ./gradlew bootJar -x test
+
+      - name: 4. Đăng nhập Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 5. Build và Push Docker Image lên Docker Hub
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/campus-hub-backend:latest
+
+  # -----------------------------------------------------------
+  # GIAI ĐOẠN 3: KẾT NỐI VPS & TRIỂN KHAI PHIÊN BẢN MỚI (CD)
+  # -----------------------------------------------------------
+  deploy-to-vps:
+    name: Deploy to VPS via SSH
+    needs: [build-and-test]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Thực thi triển khai trên VPS qua SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          password: ${{ secrets.VPS_PASSWORD }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script: |
+            echo "==== BẮT ĐẦU QUY TRÌNH TRIỂN KHAI TRÊN VPS ===="
+            cd /var/www/campus-hub
+
+            # 1. Kéo mã nguồn mới nhất từ nhánh main
+            git fetch origin main
+            git reset --hard origin/main
+
+            # 2. Cập nhật và Build Frontend
+            echo "==== Building Frontend ===="
+            cd /var/www/campus-hub/frontend
+            npm install
+            npm run build
+            sudo chmod -R 755 /var/www/campus-hub/frontend/dist
+
+            # 3. Triển khai Backend (Kiểm tra nếu dùng Docker hoặc Systemd Native)
+            if [ -f "/etc/systemd/system/campus-hub.service" ]; then
+                echo "==== Triển khai theo dạng Systemd Service ===="
+                cd /var/www/campus-hub/backend
+                chmod +x gradlew
+                ./gradlew bootJar -x test --no-daemon
+                sudo systemctl restart campus-hub
+                echo "Đã restart campus-hub systemd service."
+            elif [ -f "/var/www/campus-hub/docker-compose.yml" ]; then
+                echo "==== Triển khai theo dạng Docker Compose ===="
+                cd /var/www/campus-hub
+                docker compose pull backend || true
+                docker compose up -d --build
+                echo "Đã khởi chạy lại Docker Compose."
+            fi
+
+            # 4. Nạp lại cấu hình Nginx
+            sudo systemctl reload nginx
+            echo "Đã reload Nginx."
+
+            # 5. Kiểm tra Healthcheck
+            sleep 10
+            echo "==== Kiểm tra Healthcheck ===="
+            curl -s http://127.0.0.1:8080/actuator/health || echo "Cảnh báo: Chưa thể kết nối tới Healthcheck endpoint."
+            echo "==== TRIỂN KHAI THÀNH CÔNG ===="

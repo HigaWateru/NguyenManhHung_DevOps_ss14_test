@@ -1,0 +1,50 @@
+services:
+  mysql-db:
+    # TODO 1: Chọn image MySQL phù hợp
+    image: mysql:8.0
+    container_name: campus-hub-mysql
+    restart: unless-stopped
+    environment:
+      # TODO 2: Điền thông tin database và tài khoản
+      MYSQL_DATABASE: campus_hub
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_USER: campus_user
+      MYSQL_PASSWORD: CampusHub@2026
+    ports:
+      # TODO 3: Khai báo ánh xạ cổng MySQL (chỉ lắng nghe localhost để bảo mật)
+      - "127.0.0.1:3306:3306"
+    volumes:
+      # TODO 4: Khai báo volume lưu dữ liệu
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 5s
+      retries: 10
+      interval: 5s
+
+  backend:
+    # TODO 5: Khai báo image backend hoặc cấu hình build
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: campus-hub-backend
+    restart: unless-stopped
+    ports:
+      # TODO 6: Ánh xạ cổng ứng dụng (lắng nghe localhost, Nginx sẽ làm reverse proxy vào)
+      - "127.0.0.1:8080:8080"
+    environment:
+      # TODO 7: Cấu hình kết nối Spring Boot tới MySQL container
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql-db:3306/campus_hub?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: campus_user
+      SPRING_DATASOURCE_PASSWORD: CampusHub@2026
+      DB_URL: jdbc:mysql://mysql-db:3306/campus_hub?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true
+      DB_USERNAME: campus_user
+      DB_PASSWORD: CampusHub@2026
+      SERVER_PORT: 8080
+      CORS_ALLOWED_ORIGINS: "*"
+    depends_on:
+      mysql-db:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
